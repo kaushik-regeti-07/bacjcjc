@@ -5,26 +5,42 @@ import com.example.fpm.model.RoutingLog;
 import com.example.fpm.repository.PathConfigRepository;
 import com.example.fpm.repository.RoutingLogRepository;
 import org.springframework.stereotype.Service;
+import org.springframework.beans.factory.annotation.Value;
+import com.example.fpm.sharepoint.SharePointService;
 
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.ArrayList;
 import java.util.Locale;
+import java.io.IOException;
+import java.nio.file.*;
+import java.util.stream.Collectors;
 
 @Service
 public class RoutingService {
     private final PathConfigRepository pathConfigRepository;
     private final RoutingLogRepository routingLogRepository;
+    private final SharePointService sharePointService;
+    @Value("${app.routing.mode:dry-run}")
+    private String routingMode;
+    @Value("${app.storage.local.baseDir:}")
+    private String localBaseDir;
 
-    public RoutingService(PathConfigRepository pathConfigRepository, RoutingLogRepository routingLogRepository) {
+    public RoutingService(PathConfigRepository pathConfigRepository, RoutingLogRepository routingLogRepository, SharePointService sharePointService) {
         this.pathConfigRepository = pathConfigRepository;
         this.routingLogRepository = routingLogRepository;
+        this.sharePointService = sharePointService;
     }
 
     // Stub: later integrate with Microsoft Graph to process incoming/ folder
     public Map<String, Object> runRoutingNow() {
-        List<PathConfig> activeConfigs = pathConfigRepository.findAll();
+        if ("local".equalsIgnoreCase(routingMode)) {
+            return runLocalRouting();
+        } else if ("live".equalsIgnoreCase(routingMode)) {
+            List<PathConfig> configs = pathConfigRepository.findAll();
+            return sharePointService.runLiveRouting(configs, this::persistLog);
+        }
         Map<String, Object> summary = new HashMap<>();
         summary.put("processed", 0);
         summary.put("moved", 0);
@@ -97,5 +113,87 @@ public class RoutingService {
             decisions.add(new DryRunDecision(trimmed, prefix, true, outputBase, destination, null));
         }
         return decisions;
+    }
+
+    private Map<String, Object> runLocalRouting() {
+        Map<String, Object> summary = new HashMap<>();
+        int processed = 0;
+        int moved = 0;
+        int skipped = 0;
+        int errors = 0;
+        if (localBaseDir == null || localBaseDir.trim().isEmpty()) {
+            summary.put("processed", processed);
+            summary.put("moved", moved);
+            summary.put("skipped", skipped);
+            summary.put("errors", errors);
+            return summary;
+        }
+        Path base = Paths.get(localBaseDir);
+        Path incoming = base.resolve("incoming");
+        List<PathConfig> configs = pathConfigRepository.findAll();
+        try {
+            if (!Files.exists(incoming)) {
+                Files.createDirectories(incoming);
+            }
+            List<Path> files = Files.list(incoming)
+                    .filter(p -> Files.isRegularFile(p))
+                    .collect(Collectors.toList());
+            for (Path file : files) {
+                processed++;
+                String fileName = file.getFileName().toString();
+                int sep = fileName.indexOf("__");
+                if (sep <= 0) {
+                    skipped++;
+                    persistLog(fileName, "SKIPPED", incoming.toString(), "", "Missing prefix delimiter");
+                    continue;
+                }
+                String prefix = fileName.substring(0, sep);
+                PathConfig match = null;
+                for (PathConfig pc : configs) {
+                    if (pc.getPrefix() != null && pc.getStatus() != null
+                            && pc.getPrefix().equalsIgnoreCase(prefix)
+                            && pc.getStatus().equalsIgnoreCase("Active")) {
+                        match = pc;
+                        break;
+                    }
+                }
+                if (match == null) {
+                    skipped++;
+                    persistLog(fileName, "SKIPPED", incoming.toString(), "", "No active mapping for prefix");
+                    continue;
+                }
+                String outRel = match.getOutputPath();
+                Path outDir = base.resolve(outRel.replace("/", java.io.File.separator));
+                if (!Files.exists(outDir)) {
+                    Files.createDirectories(outDir);
+                }
+                Path target = outDir.resolve(fileName);
+                try {
+                    Files.move(file, target, StandardCopyOption.REPLACE_EXISTING);
+                    moved++;
+                    persistLog(fileName, "MOVED", incoming.toString(), target.toString(), null);
+                } catch (IOException ex) {
+                    errors++;
+                    persistLog(fileName, "ERROR", incoming.toString(), outDir.toString(), ex.getMessage());
+                }
+            }
+        } catch (IOException e) {
+            // ignore here; counts remain
+        }
+        summary.put("processed", processed);
+        summary.put("moved", moved);
+        summary.put("skipped", skipped);
+        summary.put("errors", errors);
+        return summary;
+    }
+
+    private void persistLog(String fileName, String action, String from, String to, String message) {
+        RoutingLog log = new RoutingLog();
+        log.setFileName(fileName);
+        log.setAction(action);
+        log.setFromPath(from);
+        log.setToPath(to);
+        log.setMessage(message);
+        routingLogRepository.save(log);
     }
 }
