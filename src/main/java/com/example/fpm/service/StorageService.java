@@ -11,6 +11,10 @@ import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
 import java.io.InputStream;
 import java.net.URL;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 
 @Service
 public class StorageService {
@@ -64,5 +68,57 @@ public class StorageService {
          } catch (Exception e) {
              return null;
          }
+     }
+
+     public List<Map<String, Object>> listStorageFiles() throws IOException {
+         if (localBaseDir == null || localBaseDir.trim().isEmpty()) {
+             throw new IllegalStateException("local baseDir not configured");
+         }
+         Path storage = Paths.get(localBaseDir).resolve("storage");
+         if (!Files.exists(storage)) {
+             Files.createDirectories(storage);
+         }
+         List<Map<String, Object>> out = new ArrayList<>();
+         try {
+             Files.list(storage)
+                     .filter(Files::isRegularFile)
+                     .forEach(p -> {
+                         Map<String, Object> m = new HashMap<>();
+                         m.put("name", p.getFileName().toString());
+                         try {
+                             m.put("size", Files.size(p));
+                             m.put("modified", Files.getLastModifiedTime(p).toMillis());
+                         } catch (IOException ignored) {}
+                         out.add(m);
+                     });
+         } catch (IOException e) {
+             throw e;
+         }
+         return out;
+     }
+
+     public Map<String, Object> importFromStorage(String fileName) throws IOException {
+         if (localBaseDir == null || localBaseDir.trim().isEmpty()) {
+             throw new IllegalStateException("local baseDir not configured");
+         }
+         if (fileName == null || fileName.trim().isEmpty()) {
+             throw new IllegalArgumentException("fileName is required");
+         }
+         Path base = Paths.get(localBaseDir);
+         Path storage = base.resolve("storage");
+         Path incoming = base.resolve("incoming");
+         if (!Files.exists(incoming)) Files.createDirectories(incoming);
+         Path src = storage.resolve(fileName);
+         Map<String, Object> res = new HashMap<>();
+         if (!Files.exists(src)) {
+             res.put("imported", false);
+             res.put("reason", "file not found in storage");
+             return res;
+         }
+         Path dest = incoming.resolve(fileName);
+         Files.copy(src, dest, StandardCopyOption.REPLACE_EXISTING);
+         res.put("imported", true);
+         res.put("path", dest.toString());
+         return res;
      }
 }

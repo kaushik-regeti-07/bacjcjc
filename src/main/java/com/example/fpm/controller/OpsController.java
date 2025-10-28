@@ -7,8 +7,10 @@ import org.springframework.web.multipart.MultipartFile;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.List;
 
 @RestController
+@CrossOrigin(origins = {"http://localhost:3000", "http://127.0.0.1:3000"}, allowCredentials = "false")
 @RequestMapping("/api/ops")
 public class OpsController {
 
@@ -28,5 +30,17 @@ public class OpsController {
         resp.put("saved", true);
         resp.put("path", savedPath);
         return ResponseEntity.ok(resp);
+    }
+
+    // List files under baseDir/storage (for OPS to choose to import)
+    @GetMapping("/storage")
+    public ResponseEntity<List<Map<String, Object>>> listStorage() throws Exception {
+        return ResponseEntity.ok(storageService.listStorageFiles());
+    }
+
+    // Import a single file from storage to incoming
+    @PostMapping("/import-storage")
+    public ResponseEntity<Map<String, Object>> importFromStorage(@RequestParam("fileName") String fileName) throws Exception {
+        return ResponseEntity.ok(storageService.importFromStorage(fileName));
     }
 }
