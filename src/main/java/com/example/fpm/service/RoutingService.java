@@ -49,11 +49,68 @@ public class RoutingService {
         return summary;
     }
 
+    private Map<String, Object> routeSingleLocal(String fileName) {
+        Map<String, Object> res = new HashMap<>();
+        if (localBaseDir == null || localBaseDir.trim().isEmpty()) {
+            res.put("moved", false);
+            res.put("reason", "baseDir not configured");
+            return res;
+        }
+        Path base = Paths.get(localBaseDir);
+        Path incoming = base.resolve("incoming");
+        Path source = incoming.resolve(fileName);
+        if (!Files.exists(source)) {
+            res.put("moved", false);
+            res.put("reason", "file not found in incoming");
+            return res;
+        }
+        List<PathConfig> configs = pathConfigRepository.findAll();
+        int sep = fileName.indexOf("__");
+        if (sep <= 0) {
+            persistLog(fileName, "SKIPPED", incoming.toString(), "", "Missing prefix delimiter");
+            res.put("moved", false);
+            res.put("reason", "missing prefix delimiter");
+            return res;
+        }
+        String prefix = fileName.substring(0, sep);
+        PathConfig match = null;
+        for (PathConfig pc : configs) {
+            if (pc.getPrefix() != null && pc.getStatus() != null
+                    && pc.getPrefix().equalsIgnoreCase(prefix)
+                    && pc.getStatus().equalsIgnoreCase("Active")) {
+                match = pc;
+                break;
+            }
+        }
+        if (match == null) {
+            persistLog(fileName, "SKIPPED", incoming.toString(), "", "No active mapping for prefix");
+            res.put("moved", false);
+            res.put("reason", "no active mapping for prefix");
+            return res;
+        }
+        String outRel = match.getOutputPath();
+        Path outDir = base.resolve(outRel.replace("/", java.io.File.separator));
+        try {
+            if (!Files.exists(outDir)) Files.createDirectories(outDir);
+            Path target = outDir.resolve(fileName);
+            Files.move(source, target, StandardCopyOption.REPLACE_EXISTING);
+            persistLog(fileName, "MOVED", incoming.toString(), target.toString(), null);
+            res.put("moved", true);
+            res.put("destination", target.toString());
+            return res;
+        } catch (IOException e) {
+            persistLog(fileName, "ERROR", incoming.toString(), outDir.toString(), e.getMessage());
+            res.put("moved", false);
+            res.put("reason", e.getMessage());
+            return res;
+        }
+    }
+
     public static class DryRunDecision {
         private String fileName;
         private String prefix;
         private boolean matched;
-        private String outputPath; // reports/compliance/<Prefix>
+        private String outputPath; // reports/<Group>
         private String destinationPath; // outputPath + "/" + fileName
         private String reason; // if not matched
 
@@ -88,31 +145,60 @@ public class RoutingService {
         for (String name : fileNames) {
             if (name == null || name.trim().isEmpty()) continue;
             String trimmed = name.trim();
-            int sep = trimmed.indexOf("__");
+            int sep = trimmed.indexOf('_');
             if (sep <= 0) {
-                decisions.add(new DryRunDecision(trimmed, null, false, null, null, "Filename missing prefix delimiter '__'"));
+                decisions.add(new DryRunDecision(trimmed, null, false, null, null, "Filename missing prefix delimiter '_'"));
                 continue;
             }
             String prefix = trimmed.substring(0, sep);
-            PathConfig match = null;
-            for (PathConfig pc : configs) {
-                if (pc.getPrefix() != null && pc.getStatus() != null
-                        && pc.getPrefix().equalsIgnoreCase(prefix)
-                        && pc.getStatus().equalsIgnoreCase("Active")) {
-                    match = pc;
-                    break;
-                }
-            }
-            if (match == null) {
-                decisions.add(new DryRunDecision(trimmed, prefix, false, null, null, "No active mapping for prefix"));
-                continue;
-            }
-            String outputBase = match.getOutputPath();
-            // If outputPath is reports/compliance/Finance we place file inside it
+            String outputBase = detectOutputBase(prefix);
             String destination = (outputBase.endsWith("/")) ? outputBase + trimmed : outputBase + "/" + trimmed;
             decisions.add(new DryRunDecision(trimmed, prefix, true, outputBase, destination, null));
         }
         return decisions;
+    }
+
+    public List<Map<String, Object>> listIncomingFiles() {
+        if (!"local".equalsIgnoreCase(routingMode)) {
+            return List.of();
+        }
+        if (localBaseDir == null || localBaseDir.trim().isEmpty()) {
+            return List.of();
+        }
+        Path incoming = Paths.get(localBaseDir).resolve("incoming");
+        if (!Files.exists(incoming)) return List.of();
+        try {
+            return Files.list(incoming)
+                    .filter(Files::isRegularFile)
+                    .map(p -> {
+                        Map<String, Object> m = new HashMap<>();
+                        m.put("name", p.getFileName().toString());
+                        try {
+                            m.put("size", Files.size(p));
+                            m.put("modified", Files.getLastModifiedTime(p).toMillis());
+                        } catch (IOException ignored) {}
+                        return m;
+                    })
+                    .collect(Collectors.toList());
+        } catch (IOException e) {
+            return List.of();
+        }
+    }
+
+    public Map<String, Object> routeSingle(String fileName) {
+        if (fileName == null || fileName.trim().isEmpty()) {
+            throw new IllegalArgumentException("fileName is required");
+        }
+        if ("local".equalsIgnoreCase(routingMode)) {
+            return routeSingleLocal(fileName.trim());
+        } else if ("live".equalsIgnoreCase(routingMode)) {
+            // Optional: implement live single move later
+            throw new UnsupportedOperationException("Single-file routing not implemented for live mode");
+        }
+        Map<String, Object> res = new HashMap<>();
+        res.put("moved", false);
+        res.put("reason", "routing disabled");
+        return res;
     }
 
     private Map<String, Object> runLocalRouting() {
@@ -130,7 +216,6 @@ public class RoutingService {
         }
         Path base = Paths.get(localBaseDir);
         Path incoming = base.resolve("incoming");
-        List<PathConfig> configs = pathConfigRepository.findAll();
         try {
             if (!Files.exists(incoming)) {
                 Files.createDirectories(incoming);
@@ -141,28 +226,14 @@ public class RoutingService {
             for (Path file : files) {
                 processed++;
                 String fileName = file.getFileName().toString();
-                int sep = fileName.indexOf("__");
+                int sep = fileName.indexOf('_');
                 if (sep <= 0) {
                     skipped++;
-                    persistLog(fileName, "SKIPPED", incoming.toString(), "", "Missing prefix delimiter");
+                    persistLog(fileName, "SKIPPED", incoming.toString(), "", "Missing prefix delimiter '_'");
                     continue;
                 }
                 String prefix = fileName.substring(0, sep);
-                PathConfig match = null;
-                for (PathConfig pc : configs) {
-                    if (pc.getPrefix() != null && pc.getStatus() != null
-                            && pc.getPrefix().equalsIgnoreCase(prefix)
-                            && pc.getStatus().equalsIgnoreCase("Active")) {
-                        match = pc;
-                        break;
-                    }
-                }
-                if (match == null) {
-                    skipped++;
-                    persistLog(fileName, "SKIPPED", incoming.toString(), "", "No active mapping for prefix");
-                    continue;
-                }
-                String outRel = match.getOutputPath();
+                String outRel = detectOutputBase(prefix);
                 Path outDir = base.resolve(outRel.replace("/", java.io.File.separator));
                 if (!Files.exists(outDir)) {
                     Files.createDirectories(outDir);
@@ -185,6 +256,22 @@ public class RoutingService {
         summary.put("skipped", skipped);
         summary.put("errors", errors);
         return summary;
+    }
+
+    private String detectOutputBase(String rawPrefix) {
+        if (rawPrefix == null || rawPrefix.isEmpty()) return "reports/Unmapped";
+        String p = rawPrefix.trim();
+        String lower = p.toLowerCase(Locale.ROOT);
+        // Known groups mapping
+        if (lower.equals("finance")) return "reports/Finance";
+        if (lower.equals("risk")) return "reports/Risk"; // Risk Management → Risk
+        if (lower.equals("trading")) return "reports/Trading";
+        if (lower.equals("hr")) return "reports/HR"; // HR Analytics → HR
+        if (lower.equals("operations")) return "reports/Operations";
+        if (lower.equals("compliance")) return "reports/Compliance";
+        // fallback: capitalize first letter
+        String cap = p.substring(0,1).toUpperCase(Locale.ROOT) + p.substring(1);
+        return "reports/" + cap;
     }
 
     private void persistLog(String fileName, String action, String from, String to, String message) {
