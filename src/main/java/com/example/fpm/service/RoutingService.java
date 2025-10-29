@@ -64,31 +64,15 @@ public class RoutingService {
             res.put("reason", "file not found in incoming");
             return res;
         }
-        List<PathConfig> configs = pathConfigRepository.findAll();
-        int sep = fileName.indexOf("__");
+        int sep = fileName.indexOf('_');
         if (sep <= 0) {
-            persistLog(fileName, "SKIPPED", incoming.toString(), "", "Missing prefix delimiter");
+            persistLog(fileName, "SKIPPED", incoming.toString(), "", "Missing prefix delimiter '_'");
             res.put("moved", false);
-            res.put("reason", "missing prefix delimiter");
+            res.put("reason", "missing prefix delimiter '_'");
             return res;
         }
         String prefix = fileName.substring(0, sep);
-        PathConfig match = null;
-        for (PathConfig pc : configs) {
-            if (pc.getPrefix() != null && pc.getStatus() != null
-                    && pc.getPrefix().equalsIgnoreCase(prefix)
-                    && pc.getStatus().equalsIgnoreCase("Active")) {
-                match = pc;
-                break;
-            }
-        }
-        if (match == null) {
-            persistLog(fileName, "SKIPPED", incoming.toString(), "", "No active mapping for prefix");
-            res.put("moved", false);
-            res.put("reason", "no active mapping for prefix");
-            return res;
-        }
-        String outRel = match.getOutputPath();
+        String outRel = detectOutputBase(prefix); // group-based mapping e.g., reports/Finance
         Path outDir = base.resolve(outRel.replace("/", java.io.File.separator));
         try {
             if (!Files.exists(outDir)) Files.createDirectories(outDir);
